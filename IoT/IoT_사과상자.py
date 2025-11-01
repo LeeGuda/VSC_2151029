@@ -240,7 +240,7 @@ def Packer():
 IOTask_Packer = threading.Thread(target=Packer)
 IOTask_Packer.start()
 
-# -------------------- 이하 탐과제 작성 영역 --------------------
+# -------------------- 이하 팀과제 작성 영역 --------------------
 
 MAX_WEIGHT = 1 * 1000 # 1KG
 
