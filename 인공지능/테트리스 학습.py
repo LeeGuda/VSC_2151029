@@ -185,11 +185,56 @@ class DQNAgent:
     def update_target(self):
         self.target_model.load_state_dict(self.model.state_dict())
 
+def train_tetris_agent(proc_id, episodes=250, shared_memory=None):
+    device = torch.device('cpu')
+    env = TetrisEnv()
+    state_dim = env.board.size
+    action_dim = 4
+    agent = DQNAgent(state_dim, action_dim)
+    agent.model.to(device)
+    agent.target_model.to(device)
+    max_memory = 10000000
+    if shared_memory is not None:
+        agent.memory = deque(shared_memory, maxlen=max_memory)
+    model_path = f"best_model_{proc_id}.pth"
+    exp_path = f"experience_{proc_id}.pkl"
+    if os.path.exists(model_path):
+        agent.model.load_state_dict(torch.load(model_path))
+    if os.path.exists(exp_path):
+        with open(exp_path, "rb") as f:
+            agent.memory.extend(pickle.load(f))
+    best_reward = -float('inf')
+    for ep in range(episodes):
+        state = env.reset().flatten()
+        total_reward = 0
+        for t in range(500):
+            state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+            action = agent.act(state)
+            next_state, reward, done, _ = env.step(action)
+            next_state = next_state.flatten()
+            agent.remember(state, action, reward, next_state, done)
+            agent.train()
+            state = next_state
+            total_reward += reward
+            if done:
+                break
+        if total_reward > best_reward:
+            best_reward = total_reward
+            torch.save(agent.model.state_dict(), model_path)
+            with open(exp_path, "wb") as f:
+                pickle.dump(agent.memory, f)
+            print(f"Process {proc_id}: Best model & experience saved at episode {ep}, reward {best_reward}")
+            import subprocess
+            subprocess.run(["git", "add", model_path, exp_path])
+            subprocess.run(["git", "commit", "-m", f"Proc {proc_id}: Update best model & experience at episode {ep}, reward {best_reward}"])
+            subprocess.run(["git", "push"])
+    print(f"Process {proc_id} finished.")
+
 if __name__ == "__main__":
     # 모든 경험 데이터 통합
     import pickle, glob
     from collections import deque
-    max_memory = 10000000  # 최대 1천만개까지 저장 (RAM 16GB 기준)
+    max_memory = 10000000
     unified_memory = deque(maxlen=max_memory)
     for exp_file in glob.glob("experience_*.pkl"):
         with open(exp_file, "rb") as f:
@@ -199,53 +244,6 @@ if __name__ == "__main__":
 
     num_procs = 8
     procs = []
-    def train_tetris_agent(proc_id, episodes=250, shared_memory=None):
-        device = torch.device('cpu')
-        env = TetrisEnv()
-        state_dim = env.board.size
-        action_dim = 4
-        agent = DQNAgent(state_dim, action_dim)
-        agent.model.to(device)
-        agent.target_model.to(device)
-        # 통합 경험 데이터로 시작
-        if shared_memory is not None:
-            agent.memory = deque(shared_memory, maxlen=max_memory)
-        # 모델 및 경험 데이터 불러오기 (각 프로세스별 파일명 분리)
-        model_path = f"best_model_{proc_id}.pth"
-        exp_path = f"experience_{proc_id}.pkl"
-        if os.path.exists(model_path):
-            agent.model.load_state_dict(torch.load(model_path))
-        if os.path.exists(exp_path):
-            with open(exp_path, "rb") as f:
-                agent.memory.extend(pickle.load(f))
-        best_reward = -float('inf')
-        for ep in range(episodes):
-            state = env.reset().flatten()
-            total_reward = 0
-            for t in range(500):
-                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-                action = agent.act(state)
-                next_state, reward, done, _ = env.step(action)
-                next_state = next_state.flatten()
-                agent.remember(state, action, reward, next_state, done)
-                agent.train()
-                state = next_state
-                total_reward += reward
-                if done:
-                    break
-            # 최고 리워드 갱신 시만 저장
-            if total_reward > best_reward:
-                best_reward = total_reward
-                torch.save(agent.model.state_dict(), model_path)
-                with open(exp_path, "wb") as f:
-                    pickle.dump(agent.memory, f)
-                print(f"Process {proc_id}: Best model & experience saved at episode {ep}, reward {best_reward}")
-                import subprocess
-                subprocess.run(["git", "add", model_path, exp_path])
-                subprocess.run(["git", "commit", "-m", f"Proc {proc_id}: Update best model & experience at episode {ep}, reward {best_reward}"])
-                subprocess.run(["git", "push"])
-        print(f"Process {proc_id} finished.")
-
     for i in range(num_procs):
         p = Process(target=train_tetris_agent, args=(i, 250, unified_memory))
         p.start()
