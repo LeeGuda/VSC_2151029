@@ -6,6 +6,9 @@ import random
 from collections import deque
 import matplotlib.pyplot as plt
 import pickle
+import os
+import subprocess
+from multiprocessing import Process
 
 # 테트로미노 블록 정의
 TETROMINOS = [
@@ -182,45 +185,70 @@ class DQNAgent:
     def update_target(self):
         self.target_model.load_state_dict(self.model.state_dict())
 
-# 학습 루프
 if __name__ == "__main__":
-    env = TetrisEnv()
-    state_dim = env.board.size
-    action_dim = 4
-    agent = DQNAgent(state_dim, action_dim)
+    # 모든 경험 데이터 통합
+    import pickle, glob
+    from collections import deque
+    max_memory = 10000000  # 최대 1천만개까지 저장 (RAM 16GB 기준)
+    unified_memory = deque(maxlen=max_memory)
+    for exp_file in glob.glob("experience_*.pkl"):
+        with open(exp_file, "rb") as f:
+            data = pickle.load(f)
+            unified_memory.extend(data)
+    print(f"Unified experience memory loaded: {len(unified_memory)} samples.")
 
-    # 모델 및 경험 데이터 불러오기
-    import os
-    if os.path.exists("best_model.pth"):
-        agent.model.load_state_dict(torch.load("best_model.pth"))
-        print("Loaded previous best model.")
-    if os.path.exists("experience.pkl"):
-        with open("experience.pkl", "rb") as f:
-            agent.memory = pickle.load(f)
-        print("Loaded previous experience data.")
-
-    episodes = 1000
-    best_reward = -float('inf')
-    for ep in range(episodes):
-        state = env.reset().flatten()
-        total_reward = 0
-        for t in range(500):
-            action = agent.act(state)
-            next_state, reward, done, _ = env.step(action)
-            next_state = next_state.flatten()
-            agent.remember(state, action, reward, next_state, done)
-            agent.train()
-            state = next_state
-            total_reward += reward
-            # 리워드가 발생하면 파라미터와 경험 데이터 저장 및 깃허브 푸시
-            if reward > 0:
-                torch.save(agent.model.state_dict(), "best_model.pth")
-                with open("experience.pkl", "wb") as f:
+    num_procs = 8
+    procs = []
+    def train_tetris_agent(proc_id, episodes=250, shared_memory=None):
+        device = torch.device('cpu')
+        env = TetrisEnv()
+        state_dim = env.board.size
+        action_dim = 4
+        agent = DQNAgent(state_dim, action_dim)
+        agent.model.to(device)
+        agent.target_model.to(device)
+        # 통합 경험 데이터로 시작
+        if shared_memory is not None:
+            agent.memory = deque(shared_memory, maxlen=max_memory)
+        # 모델 및 경험 데이터 불러오기 (각 프로세스별 파일명 분리)
+        model_path = f"best_model_{proc_id}.pth"
+        exp_path = f"experience_{proc_id}.pkl"
+        if os.path.exists(model_path):
+            agent.model.load_state_dict(torch.load(model_path))
+        if os.path.exists(exp_path):
+            with open(exp_path, "rb") as f:
+                agent.memory.extend(pickle.load(f))
+        best_reward = -float('inf')
+        for ep in range(episodes):
+            state = env.reset().flatten()
+            total_reward = 0
+            for t in range(500):
+                state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+                action = agent.act(state)
+                next_state, reward, done, _ = env.step(action)
+                next_state = next_state.flatten()
+                agent.remember(state, action, reward, next_state, done)
+                agent.train()
+                state = next_state
+                total_reward += reward
+                if done:
+                    break
+            # 최고 리워드 갱신 시만 저장
+            if total_reward > best_reward:
+                best_reward = total_reward
+                torch.save(agent.model.state_dict(), model_path)
+                with open(exp_path, "wb") as f:
                     pickle.dump(agent.memory, f)
-                print(f"Model & experience saved at episode {ep}, step {t}, reward {reward}")
+                print(f"Process {proc_id}: Best model & experience saved at episode {ep}, reward {best_reward}")
                 import subprocess
-                subprocess.run(["git", "add", "best_model.pth", "experience.pkl"])
-                subprocess.run(["git", "commit", "-m", f"Update best model & experience at episode {ep}, step {t}, reward {reward}"])
+                subprocess.run(["git", "add", model_path, exp_path])
+                subprocess.run(["git", "commit", "-m", f"Proc {proc_id}: Update best model & experience at episode {ep}, reward {best_reward}"])
                 subprocess.run(["git", "push"])
-            if done:
-                break
+        print(f"Process {proc_id} finished.")
+
+    for i in range(num_procs):
+        p = Process(target=train_tetris_agent, args=(i, 250, unified_memory))
+        p.start()
+        procs.append(p)
+    for p in procs:
+        p.join()
